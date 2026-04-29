@@ -13,6 +13,7 @@ import time
 import requests
 import hashlib
 import random
+import json
 from flask import Flask, request, jsonify
 from functools import wraps
 import threading
@@ -26,6 +27,23 @@ API_KEY = os.environ.get("API_KEY", "DARK-STORMX-DEEPX")
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT", "60"))
 DEBUG_MODE = os.environ.get("DEBUG", "False").lower() == "true"
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
+
+# User API keys (in-memory for now)
+USER_API_KEYS = {
+    "admin": "DARK-STORMX-EMPIRE"  # Default admin key
+}
+
+# Load user API keys from file
+def load_user_keys():
+    try:
+        with open('users.json', 'r') as f:
+            users = json.load(f)
+            for username, data in users.items():
+                USER_API_KEYS[username] = data.get('api_key', '')
+    except FileNotFoundError:
+        pass  # No users file yet
+
+load_user_keys()
 
 # In-memory storage
 user_requests = {}
@@ -214,7 +232,8 @@ def auth_required(f):
                 "error": "API key required. Provide via X-API-Key header or api_key query parameter."
             }), 401
         
-        if api_key != API_KEY:
+        # Check if it's the admin key or a valid user key
+        if api_key != API_KEY and api_key not in USER_API_KEYS.values():
             return jsonify({
                 "success": False,
                 "error": "Invalid API key."

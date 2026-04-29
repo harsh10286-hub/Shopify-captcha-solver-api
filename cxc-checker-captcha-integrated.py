@@ -71,6 +71,10 @@ def load_json(filename, default=None):
     except:
         return default if default else {}
 
+def save_users():
+    """Save users to JSON file"""
+    save_json('users.json', users_db)
+
 # Initialize data stores
 sites_data = load_json(SITES_FILE, {"sites": []})
 proxies_data = load_json(PROXIES_FILE, {"proxies": []})
@@ -2394,15 +2398,25 @@ def process_api():
         key = request.args.get('key')
         client_ip = request.remote_addr
 
+        # Validate API key
+        valid_key = False
+        user_with_key = None
+        for username, user_data in users_db.items():
+            if user_data.get('api_key') == key:
+                valid_key = True
+                user_with_key = username
+                break
+
         # Log the request
         add_log("INFO", "API request received", {
             "ip": client_ip,
             "site": site,
             "proxy": "Yes" if proxy else "No",
-            "key_valid": key == "DARK-STORMX-EMPIRE"
+            "key_valid": valid_key,
+            "user": user_with_key
         })
 
-        if not key or key != "DARK-STORMX-EMPIRE":
+        if not key or not valid_key:
             add_log("WARNING", "Invalid API key", {"ip": client_ip, "key": key})
             return jsonify({
                 "status": "Decline",
@@ -2822,14 +2836,15 @@ def add_proxy():
 
 
 # User storage (in-memory for now, can be saved to JSON)
-users_db = {
+users_db = load_json('users.json', {
     "databasemanaging": {
         "password": "41Ars@117",
         "role": "admin",
         "status": "active",
-        "last_login": None
+        "last_login": None,
+        "api_key": "DARK-STORMX-EMPIRE"
     }
-}
+})
 
 # User check history storage
 user_history = {}
@@ -2902,7 +2917,8 @@ def add_user():
             "password": password,
             "role": role,
             "status": "active",
-            "last_login": None
+            "last_login": None,
+            "api_key": str(uuid.uuid4())
         }
         
         add_log("INFO", "User added", {"username": username, "role": role})
@@ -2964,6 +2980,7 @@ def api_user_login():
         
         if username in users_db and users_db[username]['password'] == password:
             users_db[username]['last_login'] = datetime.utcnow().isoformat()
+            save_users()  # Save to JSON
             return jsonify({
                 "success": True,
                 "message": "Login successful",
@@ -3008,8 +3025,11 @@ def api_user_register():
             "email": email,
             "role": "user",
             "status": "active",
-            "last_login": None
+            "last_login": None,
+            "api_key": str(uuid.uuid4())
         }
+        
+        save_users()  # Save to JSON
         
         add_log("INFO", "User registered", {"username": username, "email": email})
         
@@ -3019,6 +3039,62 @@ def api_user_register():
         })
     except Exception as e:
         logger.error(f"User register error: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/api/user/api_key', methods=['GET'])
+def api_user_get_api_key():
+    """Get user's API key"""
+    try:
+        username = request.args.get('username')
+        
+        if not username:
+            return jsonify({"success": False, "error": "Username required"}), 400
+        
+        if username not in users_db:
+            return jsonify({"success": False, "error": "User not found"}), 404
+        
+        return jsonify({
+            "success": True,
+            "api_key": users_db[username]['api_key']
+        })
+    except Exception as e:
+        logger.error(f"Get API key error: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/api/user/api_key', methods=['POST'])
+def api_user_regenerate_api_key():
+    """Regenerate user's API key"""
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        
+        if not username:
+            return jsonify({"success": False, "error": "Username required"}), 400
+        
+        if username not in users_db:
+            return jsonify({"success": False, "error": "User not found"}), 404
+        
+        new_api_key = str(uuid.uuid4())
+        users_db[username]['api_key'] = new_api_key
+        
+        save_users()  # Save to JSON
+        
+        add_log("INFO", "API key regenerated", {"username": username})
+        
+        return jsonify({
+            "success": True,
+            "api_key": new_api_key
+        })
+    except Exception as e:
+        logger.error(f"Regenerate API key error: {e}")
         return jsonify({
             "success": False,
             "error": str(e)

@@ -978,9 +978,32 @@
         }
 
         function regenerateApiKey() {
-            const newKey = 'user_' + Math.random().toString(36).substring(7);
-            document.getElementById('userApiKey').textContent = newKey;
-            alert('New API key generated: ' + newKey);
+            const username = localStorage.getItem('username');
+            if (!username) {
+                alert('Not logged in');
+                return;
+            }
+            
+            fetch('/api/user/api_key', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ username: username })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById('userApiKey').textContent = data.api_key;
+                    alert('New API key generated: ' + data.api_key);
+                } else {
+                    alert('Error regenerating API key: ' + data.error);
+                }
+            })
+            .catch(err => {
+                console.error('Error regenerating API key:', err);
+                alert('Error regenerating API key');
+            });
         }
 
         function saveProfile() {
@@ -1027,10 +1050,33 @@
             }
         }
 
+        // Load user's API key from backend
+        function loadUserApiKey() {
+            const username = localStorage.getItem('username');
+            if (!username) {
+                document.getElementById('userApiKey').textContent = 'Not logged in';
+                return;
+            }
+            
+            fetch(`/api/user/api_key?username=${encodeURIComponent(username)}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('userApiKey').textContent = data.api_key;
+                    } else {
+                        document.getElementById('userApiKey').textContent = 'Error loading API key';
+                    }
+                })
+                .catch(err => {
+                    console.error('Error loading API key:', err);
+                    document.getElementById('userApiKey').textContent = 'Error loading API key';
+                });
+        }
+
         // Initialize
         loadHistory();
         loadSitesForSelector();
-        document.getElementById('userApiKey').textContent = 'user_' + Math.random().toString(36).substring(7);
+        loadUserApiKey();
         document.getElementById('apiToday').textContent = history.filter(h => new Date(h.time).toDateString() === new Date().toDateString()).length;
         document.getElementById('apiMonth').textContent = history.length;
         
