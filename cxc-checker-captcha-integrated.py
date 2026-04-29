@@ -1000,6 +1000,35 @@ def get_delivery_line_config(shipping_handle="any", destination_changed=True, me
 
     return config
 
+
+def extract_amount_from_money_value(value):
+    """Extract a numeric amount from a variety of GraphQL money value shapes."""
+    if not isinstance(value, dict):
+        return None
+
+    if "value" in value and isinstance(value["value"], dict):
+        val = value["value"]
+        if "amount" in val:
+            return val.get("amount")
+        if "value" in val:
+            return val.get("value")
+
+    if "amount" in value:
+        return value.get("amount")
+
+    return None
+
+
+def extract_currency_from_money_value(value, default="USD"):
+    if not isinstance(value, dict):
+        return default
+
+    if "value" in value and isinstance(value["value"], dict):
+        return value["value"].get("currencyCode", default)
+
+    return value.get("currencyCode", default)
+
+
 def poll_for_delivery_and_expectations(session, checkout_token, session_token, merchandise_stable_id, max_attempts=7):
     print(f"  [POLL] Waiting for delivery terms and expectations...")
     
@@ -1569,12 +1598,23 @@ def step3_proposal(session, checkout_token, session_token, card_session_id, shop
             actual_total = None
             currency_code = "USD"
             checkout_total = seller_proposal.get('checkoutTotal', {})
-            if checkout_total.get('__typename') == 'MoneyValueConstraint':
-                value = checkout_total.get('value', {})
-                actual_total = value.get('amount')
-                currency_code = value.get('currencyCode', 'USD')
-                if actual_total:
-                    print(f"  [OK] Total: ${actual_total} {currency_code}")
+            actual_total = extract_amount_from_money_value(checkout_total)
+            currency_code = extract_currency_from_money_value(checkout_total, currency_code)
+            if actual_total:
+                print(f"  [OK] Total: ${actual_total} {currency_code}")
+            else:
+                # Try fallback from merchandise proposal if GraphQL shape changed
+                merchandise = seller_proposal.get('merchandise', {})
+                if isinstance(merchandise, dict):
+                    merch_lines = merchandise.get('merchandiseLines', [])
+                    if merch_lines:
+                        line_price = extract_amount_from_money_value(merch_lines[0].get('expectedTotalPrice', {}))
+                        if line_price:
+                            actual_total = line_price
+                            print(f"  [OK] Fallback total from merchandise line: ${actual_total} {currency_code}")
+
+                if not actual_total:
+                    print("  [WARNING] Total amount missing from proposal response")
             
             delivery_expectations = []
             delivery_exp_terms = seller_proposal.get('deliveryExpectations', {})

