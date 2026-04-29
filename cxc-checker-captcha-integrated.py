@@ -2399,10 +2399,10 @@ def process_api():
             "ip": client_ip,
             "site": site,
             "proxy": "Yes" if proxy else "No",
-            "key_valid": key == "md-tech"
+            "key_valid": key == "DARK-STORMX-EMPIRE"
         })
 
-        if not key or key != "md-tech":
+        if not key or key != "DARK-STORMX-EMPIRE":
             add_log("WARNING", "Invalid API key", {"ip": client_ip, "key": key})
             return jsonify({
                 "status": "Decline",
