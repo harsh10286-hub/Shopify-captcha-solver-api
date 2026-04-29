@@ -2478,7 +2478,6 @@ def process_api():
 
         result = process_checkout(cc, site, proxy)
 
-        # Log the result
         add_log("INFO", "Checkout completed", {
             "ip": client_ip,
             "site": site,
@@ -2487,8 +2486,7 @@ def process_api():
             "captcha_solved": result.get('captcha_solved'),
             "response": result.get('response')
         })
-        
-        # Save to user history if logged in
+
         if 'username' in request.args:
             username = request.args.get('username')
             if username not in user_history:
